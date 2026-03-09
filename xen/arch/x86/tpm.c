@@ -95,111 +95,32 @@ static bool is_amd_cpu(void)
 
 #define TPM_LOC_REG(loc, reg)   (0x1000 * (loc) + (reg))
 
-#define TPM_ACCESS_(x)          TPM_LOC_REG(x, 0x00)
-#define ACCESS_REQUEST_USE       (1 << 1)
-#define ACCESS_ACTIVE_LOCALITY   (1 << 5)
-#define TPM_INTF_CAPABILITY_(x) TPM_LOC_REG(x, 0x14)
-#define INTF_VERSION_MASK        0x70000000
-#define TPM_STS_(x)             TPM_LOC_REG(x, 0x18)
-#define TPM_FAMILY_MASK          0x0C000000
-#define STS_DATA_AVAIL           (1 << 4)
-#define STS_TPM_GO               (1 << 5)
-#define STS_COMMAND_READY        (1 << 6)
-#define STS_VALID                (1 << 7)
-#define TPM_DATA_FIFO_(x)       TPM_LOC_REG(x, 0x24)
+/******************************** MMIO helpers ********************************/
 
 #define swap16(x)       __builtin_bswap16(x)
 #define swap32(x)       __builtin_bswap32(x)
 #define memset(s, c, n) __builtin_memset(s, c, n)
 #define memcpy(d, s, n) __builtin_memcpy(d, s, n)
 
-static inline volatile uint32_t tis_read32(unsigned reg)
+static inline uint32_t tpm_read32(unsigned reg)
 {
-    return *(volatile uint32_t *)__va(TPM_TIS_BASE + reg);
+    return *(volatile uint32_t *)__va(TPM_BASE + reg);
 }
 
-static inline volatile uint8_t tis_read8(unsigned reg)
+static inline uint8_t tpm_read8(unsigned reg)
 {
-    return *(volatile uint8_t *)__va(TPM_TIS_BASE + reg);
+    return *(volatile uint8_t *)__va(TPM_BASE + reg);
 }
 
-static inline void tis_write8(unsigned reg, uint8_t val)
+static inline void tpm_write32(unsigned reg, uint32_t val)
 {
-    *(volatile uint8_t *)__va(TPM_TIS_BASE + reg) = val;
+    *(volatile uint32_t *)__va(TPM_BASE + reg) = val;
 }
 
-static inline void request_locality(unsigned loc)
+static inline void tpm_write8(unsigned reg, uint8_t val)
 {
-    tis_write8(TPM_ACCESS_(loc), ACCESS_REQUEST_USE);
-    /* Check that locality was actually activated. */
-    while ( (tis_read8(TPM_ACCESS_(loc)) & ACCESS_ACTIVE_LOCALITY) == 0 );
+    *(volatile uint8_t *)__va(TPM_BASE + reg) = val;
 }
-
-static inline void relinquish_locality(unsigned loc)
-{
-    tis_write8(TPM_ACCESS_(loc), ACCESS_ACTIVE_LOCALITY);
-}
-
-static void send_cmd(unsigned loc, uint8_t *buf, unsigned i_size,
-                     unsigned *o_size)
-{
-    /*
-     * Value of "data available" bit counts only when "valid" field is set as
-     * well.
-     */
-    const unsigned data_avail = STS_VALID | STS_DATA_AVAIL;
-
-    unsigned i;
-
-    /* Make sure TPM can accept a command. */
-    if ( (tis_read8(TPM_STS_(loc)) & STS_COMMAND_READY) == 0 ) {
-        /* Abort current command. */
-        tis_write8(TPM_STS_(loc), STS_COMMAND_READY);
-        /* Wait until TPM is ready for a new one. */
-        while ( (tis_read8(TPM_STS_(loc)) & STS_COMMAND_READY) == 0 );
-    }
-
-    for ( i = 0; i < i_size; i++ )
-        tis_write8(TPM_DATA_FIFO_(loc), buf[i]);
-
-    tis_write8(TPM_STS_(loc), STS_TPM_GO);
-
-    /* Wait for the first byte of response. */
-    while ( (tis_read8(TPM_STS_(loc)) & data_avail) != data_avail);
-
-    for ( i = 0; i < *o_size && tis_read8(TPM_STS_(loc)) & data_avail; i++ )
-        buf[i] = tis_read8(TPM_DATA_FIFO_(loc));
-
-    if ( i < *o_size )
-        *o_size = i;
-
-    tis_write8(TPM_STS_(loc), STS_COMMAND_READY);
-}
-
-static inline bool is_tpm12(void)
-{
-    /*
-     * If one of these conditions is true:
-     *  - INTF_CAPABILITY_x.interfaceVersion is 0 (TIS <= 1.21)
-     *  - INTF_CAPABILITY_x.interfaceVersion is 2 (TIS == 1.3)
-     *  - STS_x.tpmFamily is 0
-     * we're dealing with TPM1.2.
-     */
-    uint32_t intf_version = tis_read32(TPM_INTF_CAPABILITY_(0))
-                          & INTF_VERSION_MASK;
-    return (intf_version == 0x00000000 || intf_version == 0x20000000 ||
-            (tis_read32(TPM_STS_(0)) & TPM_FAMILY_MASK) == 0);
-}
-
-/****************************** TPM1.2 & TPM2.0 *******************************/
-
-/*
- * TPM1.2 is required to support commands of up to 1101 bytes, vendors rarely
- * go above that. Limit maximum size of block of data to be hashed to 1024.
- *
- * TPM2.0 should support hashing of at least 1024 bytes.
- */
-#define MAX_HASH_BLOCK      1024
 
 /* All fields of following structs are big endian. */
 struct tpm_cmd_hdr {
@@ -213,6 +134,250 @@ struct tpm_rsp_hdr {
     uint32_t    paramSize;
     uint32_t    returnCode;
 } __packed;
+
+/************************** Interface detection *******************************/
+
+#define TPM_INTF_ID_(x)         TPM_LOC_REG(x, 0x30)
+#define INTF_TYPE_MASK           0x0000000F
+#define TPM_TIS_INTF_ACTIVE      0x00
+#define TPM_CRB_INTF_ACTIVE      0x01
+
+/*
+ * Detect interface by reading the register directly each time. We cannot cache
+ * the result in a static variable because the early 32-bit binary (tpm_early.bin)
+ * is built with "objcopy -j .text", so .bss/.data sections are not included.
+ */
+static inline bool tpm_is_crb(void)
+{
+    return (tpm_read32(TPM_INTF_ID_(0)) & INTF_TYPE_MASK) == TPM_CRB_INTF_ACTIVE;
+}
+
+/************************** TIS register definitions **************************/
+
+#define TPM_ACCESS_(x)          TPM_LOC_REG(x, 0x00)
+#define ACCESS_REQUEST_USE       (1 << 1)
+#define ACCESS_ACTIVE_LOCALITY   (1 << 5)
+#define TPM_INTF_CAPABILITY_(x) TPM_LOC_REG(x, 0x14)
+#define INTF_VERSION_MASK        0x70000000
+#define TPM_STS_(x)             TPM_LOC_REG(x, 0x18)
+#define TPM_FAMILY_MASK          0x0C000000
+#define STS_DATA_AVAIL           (1 << 4)
+#define STS_TPM_GO               (1 << 5)
+#define STS_COMMAND_READY        (1 << 6)
+#define STS_VALID                (1 << 7)
+#define TPM_DATA_FIFO_(x)       TPM_LOC_REG(x, 0x24)
+
+/************************** CRB register definitions **************************/
+
+#define CRB_LOC_STATE_(x)       TPM_LOC_REG(x, 0x00)
+#define CRB_LOC_STATE_LOC_ASSIGNED   (1 << 1)
+#define CRB_LOC_STATE_REG_VALID_STS  (1 << 7)
+#define CRB_LOC_CTRL_(x)       TPM_LOC_REG(x, 0x08)
+#define CRB_LOC_CTRL_REQUEST_ACCESS  (1 << 0)
+#define CRB_LOC_CTRL_RELINQUISH      (1 << 1)
+#define CRB_CTRL_REQ_(x)       TPM_LOC_REG(x, 0x40)
+#define CRB_CTRL_REQ_CMD_READY       (1 << 0)
+#define CRB_CTRL_REQ_GO_IDLE         (1 << 1)
+#define CRB_CTRL_STS_(x)       TPM_LOC_REG(x, 0x44)
+#define CRB_CTRL_STS_ERROR           (1 << 0)
+#define CRB_CTRL_CANCEL_(x)    TPM_LOC_REG(x, 0x48)
+#define CRB_CANCEL_INVOKE            (1 << 0)
+#define CRB_CTRL_START_(x)     TPM_LOC_REG(x, 0x4C)
+#define CRB_START_INVOKE             (1 << 0)
+#define CRB_CTRL_CMD_SIZE_(x)  TPM_LOC_REG(x, 0x58)
+#define CRB_CTRL_CMD_LADDR_(x) TPM_LOC_REG(x, 0x5C)
+#define CRB_CTRL_CMD_HADDR_(x) TPM_LOC_REG(x, 0x60)
+#define CRB_CTRL_RSP_SIZE_(x)  TPM_LOC_REG(x, 0x64)
+#define CRB_CTRL_RSP_ADDR_(x)  TPM_LOC_REG(x, 0x68)
+#define CRB_DATA_BUFFER_(x)    TPM_LOC_REG(x, 0x80)
+#define CRB_DATA_BUFFER_SIZE    0x0F80
+
+/************************** TIS locality & command ****************************/
+
+static inline void tis_request_locality(unsigned loc)
+{
+    tpm_write8(TPM_ACCESS_(loc), ACCESS_REQUEST_USE);
+    /* Check that locality was actually activated. */
+    while ( (tpm_read8(TPM_ACCESS_(loc)) & ACCESS_ACTIVE_LOCALITY) == 0 );
+}
+
+static inline void tis_relinquish_locality(unsigned loc)
+{
+    tpm_write8(TPM_ACCESS_(loc), ACCESS_ACTIVE_LOCALITY);
+}
+
+static void tis_send_cmd(unsigned loc, uint8_t *buf, unsigned i_size,
+                         unsigned *o_size)
+{
+    /*
+     * Value of "data available" bit counts only when "valid" field is set as
+     * well.
+     */
+    const unsigned data_avail = STS_VALID | STS_DATA_AVAIL;
+
+    unsigned i;
+
+    /* Make sure TPM can accept a command. */
+    if ( (tpm_read8(TPM_STS_(loc)) & STS_COMMAND_READY) == 0 ) {
+        /* Abort current command. */
+        tpm_write8(TPM_STS_(loc), STS_COMMAND_READY);
+        /* Wait until TPM is ready for a new one. */
+        while ( (tpm_read8(TPM_STS_(loc)) & STS_COMMAND_READY) == 0 );
+    }
+
+    for ( i = 0; i < i_size; i++ )
+        tpm_write8(TPM_DATA_FIFO_(loc), buf[i]);
+
+    tpm_write8(TPM_STS_(loc), STS_TPM_GO);
+
+    /* Wait for the first byte of response. */
+    while ( (tpm_read8(TPM_STS_(loc)) & data_avail) != data_avail);
+
+    for ( i = 0; i < *o_size && tpm_read8(TPM_STS_(loc)) & data_avail; i++ )
+        buf[i] = tpm_read8(TPM_DATA_FIFO_(loc));
+
+    if ( i < *o_size )
+        *o_size = i;
+
+    tpm_write8(TPM_STS_(loc), STS_COMMAND_READY);
+}
+
+/************************** CRB locality & command ****************************/
+
+static void crb_request_locality(unsigned loc)
+{
+    const uint32_t mask = CRB_LOC_STATE_LOC_ASSIGNED |
+                          CRB_LOC_STATE_REG_VALID_STS;
+
+    tpm_write32(CRB_LOC_CTRL_(loc), CRB_LOC_CTRL_REQUEST_ACCESS);
+    while ( (tpm_read32(CRB_LOC_STATE_(loc)) & mask) != mask );
+}
+
+static void crb_relinquish_locality(unsigned loc)
+{
+    tpm_write32(CRB_LOC_CTRL_(loc), CRB_LOC_CTRL_RELINQUISH);
+    while ( tpm_read32(CRB_LOC_STATE_(loc)) & CRB_LOC_STATE_LOC_ASSIGNED );
+}
+
+static void crb_cmd_ready(unsigned loc)
+{
+    tpm_write32(CRB_CTRL_REQ_(loc), CRB_CTRL_REQ_CMD_READY);
+    while ( tpm_read32(CRB_CTRL_REQ_(loc)) & CRB_CTRL_REQ_CMD_READY );
+}
+
+static void crb_go_idle(unsigned loc)
+{
+    tpm_write32(CRB_CTRL_REQ_(loc), CRB_CTRL_REQ_GO_IDLE);
+    while ( tpm_read32(CRB_CTRL_REQ_(loc)) & CRB_CTRL_REQ_GO_IDLE );
+}
+
+static void crb_send_cmd(unsigned loc, uint8_t *buf, unsigned i_size,
+                         unsigned *o_size)
+{
+    uint32_t data_buf_pa = TPM_BASE + CRB_DATA_BUFFER_(loc);
+    unsigned expected;
+
+    crb_cmd_ready(loc);
+
+    /* Clear cancel register. */
+    tpm_write32(CRB_CTRL_CANCEL_(loc), 0);
+
+    /* Set up command/response buffer addresses pointing to CRB data buffer. */
+    tpm_write32(CRB_CTRL_CMD_LADDR_(loc), data_buf_pa);
+    tpm_write32(CRB_CTRL_CMD_HADDR_(loc), 0);
+    tpm_write32(CRB_CTRL_CMD_SIZE_(loc), CRB_DATA_BUFFER_SIZE);
+    tpm_write32(CRB_CTRL_RSP_SIZE_(loc), CRB_DATA_BUFFER_SIZE);
+    /* Response address is 64-bit; write as two 32-bit halves. */
+    tpm_write32(CRB_CTRL_RSP_ADDR_(loc), data_buf_pa);
+    tpm_write32(CRB_CTRL_RSP_ADDR_(loc) + 4, 0);
+
+    /* Copy command into CRB data buffer. */
+    memcpy(__va(data_buf_pa), buf, i_size);
+
+    /* Start command execution. */
+    tpm_write32(CRB_CTRL_START_(loc), CRB_START_INVOKE);
+
+    /* Wait for command to complete (START bit clears). */
+    while ( tpm_read32(CRB_CTRL_START_(loc)) & CRB_START_INVOKE );
+
+    /* Check for TPM error. */
+    if ( tpm_read32(CRB_CTRL_STS_(loc)) & CRB_CTRL_STS_ERROR ) {
+        *o_size = 0;
+        crb_go_idle(loc);
+        return;
+    }
+
+    /* Read response header to determine total size. */
+    memcpy(buf, __va(data_buf_pa), sizeof(struct tpm_rsp_hdr));
+    expected = swap32(((struct tpm_rsp_hdr *)buf)->paramSize);
+    if ( expected > *o_size )
+        expected = *o_size;
+    if ( expected > CRB_DATA_BUFFER_SIZE )
+        expected = CRB_DATA_BUFFER_SIZE;
+
+    /* Copy full response (including header, which is a harmless re-copy). */
+    memcpy(buf, __va(data_buf_pa), expected);
+
+    *o_size = expected;
+    crb_go_idle(loc);
+}
+
+/************************** Interface dispatch ********************************/
+
+static inline void request_locality(unsigned loc)
+{
+    if ( tpm_is_crb() )
+        crb_request_locality(loc);
+    else
+        tis_request_locality(loc);
+}
+
+static inline void relinquish_locality(unsigned loc)
+{
+    if ( tpm_is_crb() )
+        crb_relinquish_locality(loc);
+    else
+        tis_relinquish_locality(loc);
+}
+
+static void send_cmd(unsigned loc, uint8_t *buf, unsigned i_size,
+                     unsigned *o_size)
+{
+    if ( tpm_is_crb() )
+        crb_send_cmd(loc, buf, i_size, o_size);
+    else
+        tis_send_cmd(loc, buf, i_size, o_size);
+}
+
+static inline bool is_tpm12(void)
+{
+    uint32_t intf_version;
+
+    /* CRB interface is always TPM 2.0. */
+    if ( tpm_is_crb() )
+        return false;
+
+    /*
+     * If one of these conditions is true:
+     *  - INTF_CAPABILITY_x.interfaceVersion is 0 (TIS <= 1.21)
+     *  - INTF_CAPABILITY_x.interfaceVersion is 2 (TIS == 1.3)
+     *  - STS_x.tpmFamily is 0
+     * we're dealing with TPM1.2.
+     */
+    intf_version = tpm_read32(TPM_INTF_CAPABILITY_(0)) & INTF_VERSION_MASK;
+    return (intf_version == 0x00000000 || intf_version == 0x20000000 ||
+            (tpm_read32(TPM_STS_(0)) & TPM_FAMILY_MASK) == 0);
+}
+
+/****************************** TPM1.2 & TPM2.0 *******************************/
+
+/*
+ * TPM1.2 is required to support commands of up to 1101 bytes, vendors rarely
+ * go above that. Limit maximum size of block of data to be hashed to 1024.
+ *
+ * TPM2.0 should support hashing of at least 1024 bytes.
+ */
+#define MAX_HASH_BLOCK      1024
 
 /****************************** TPM1.2 specific *******************************/
 

@@ -4,8 +4,8 @@
 #include <xen/types.h>
 #include <xen/multiboot.h>
 
-#define TPM_TIS_BASE  0xFED40000
-#define TPM_TIS_SIZE  0x00010000
+#define TPM_BASE  0xFED40000
+#define TPM_SIZE  0x00010000
 
 void tpm_hash_extend(unsigned loc, unsigned pcr, const uint8_t *buf,
                      unsigned size, uint32_t type, const uint8_t *log_data,

@@ -87,7 +87,7 @@ void __init map_slaunch_mem_regions(void)
     void *evt_log_addr;
     uint32_t evt_log_size;
 
-    map_l2(TPM_TIS_BASE, TPM_TIS_SIZE);
+    map_l2(TPM_BASE, TPM_SIZE);
 
     /* Vendor-specific part. */
     if ( boot_cpu_data.x86_vendor == X86_VENDOR_INTEL )
