@@ -117,6 +117,6 @@ void __stdcall slaunch_early_tests(uint32_t load_base_addr,
 
     result->mbi_pa = intel_info->boot_params_base;
 
-    txt_verify_pmr_ranges(os_mle, os_sinit, intel_info,
-                          load_base_addr, tgt_base_addr, size);
+    txt_verify_dma_protection(os_mle, os_sinit, intel_info,
+                              load_base_addr, tgt_base_addr, size);
 }

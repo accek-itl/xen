@@ -71,6 +71,9 @@
 #define SLAUNCH_ERROR_TPM_NUMBER_ALGS        0xc0008020
 #define SLAUNCH_ERROR_TPM_UNKNOWN_DIGEST     0xc0008021
 #define SLAUNCH_ERROR_TPM_INVALID_EVENT      0xc0008022
+#define SLAUNCH_ERROR_TPR_INVALID            0xc0008023
+#define SLAUNCH_ERROR_TPR_UNSUPPORTED        0xc0008024
+#define SLAUNCH_ERROR_TPR_NOT_FOUND          0xc0008025
 
 #define SLAUNCH_BOOTLOADER_MAGIC             0x4c534254
 
@@ -81,6 +84,9 @@
 #define GETSEC_CAPABILITIES             0
 /* Intel SDM: GETSEC Capability Result Encoding */
 #define GETSEC_CAP_TXT_CHIPSET          1
+
+/* SINIT/MLE capability bit for TPR (TXT Protected Range) DMA protection. */
+#define TXT_SINIT_MLE_CAP_TPR_SUPPORT   14
 
 #ifndef __ASSEMBLY__
 
@@ -238,6 +244,19 @@ struct heap_event_log_pointer_element2_1 {
 } __packed;
 
 /*
+ * Extended data describing TPR (TXT Protected Range) DMA protection ranges.
+ */
+struct txt_heap_tpr_range {
+    uint64_t base;
+    uint64_t size;
+} __packed;
+
+struct txt_heap_tpr_req_element {
+    uint32_t count;
+    struct txt_heap_tpr_range ranges[0];
+} __packed;
+
+/*
  * Functions to extract data from the Intel TXT Heap Memory. The layout
  * of the heap is as follows:
  *  +---------------------------------+
@@ -306,24 +325,70 @@ static inline void *txt_sinit_mle_data_start(void *heap)
         txt_os_sinit_data_size(heap) + sizeof(uint64_t);
 }
 
-static inline int is_in_pmr(struct txt_os_sinit_data *os_sinit, uint64_t base,
-                            uint32_t size, int check_high)
+/*
+ * Find the TPR request element in the TXT heap extended data.
+ */
+static inline struct txt_heap_tpr_req_element *
+txt_find_tpr_req_element(struct txt_os_sinit_data *os_sinit)
 {
+    struct txt_ext_data_element *ext_elem;
+
+    ext_elem = (struct txt_ext_data_element *)
+        ((uint8_t *)os_sinit + sizeof(struct txt_os_sinit_data));
+
+    while ( ext_elem->type != TXT_HEAP_EXTDATA_TYPE_END )
+    {
+        if ( ext_elem->type == TXT_HEAP_EXTDATA_TYPE_TPR_REQ )
+            return (struct txt_heap_tpr_req_element *)ext_elem->data;
+
+        ext_elem = (struct txt_ext_data_element *)
+            ((uint8_t *)ext_elem + ext_elem->size);
+    }
+
+    return NULL;
+}
+
+static inline int is_in_dma_prot(struct txt_os_sinit_data *os_sinit,
+                                 uint64_t base, uint32_t size, int check_high)
+{
+    uint64_t lo_size, hi_base, hi_size;
+
     /* Check for size overflow. */
     if (base + size < base)
         txt_reset(SLAUNCH_ERROR_INTEGER_OVERFLOW);
 
+    if ( os_sinit->capabilities & (1u << TXT_SINIT_MLE_CAP_TPR_SUPPORT) )
+    {
+        struct txt_heap_tpr_req_element *tpr_req;
+
+        tpr_req = txt_find_tpr_req_element(os_sinit);
+        lo_size = tpr_req->ranges[0].base + tpr_req->ranges[0].size;
+        if ( tpr_req->count >= 2 )
+        {
+            hi_base = tpr_req->ranges[1].base;
+            hi_size = tpr_req->ranges[1].size;
+        }
+        else
+        {
+            hi_base = 0;
+            hi_size = 0;
+        }
+    }
+    else
+    {
+        lo_size = os_sinit->vtd_pmr_lo_size;
+        hi_base = os_sinit->vtd_pmr_hi_base;
+        hi_size = os_sinit->vtd_pmr_hi_size;
+    }
+
     /* Low range always starts at 0, so its size is also end address. */
-    if (base >= os_sinit->vtd_pmr_lo_base &&
-        base + size <= os_sinit->vtd_pmr_lo_size)
+    if (base + size <= lo_size)
         return 1;
 
-    if (check_high && os_sinit->vtd_pmr_hi_size != 0) {
-        if (os_sinit->vtd_pmr_hi_base + os_sinit->vtd_pmr_hi_size <
-            os_sinit->vtd_pmr_hi_size)
+    if (check_high && hi_size != 0) {
+        if (hi_base + hi_size < hi_size)
             txt_reset(SLAUNCH_ERROR_INTEGER_OVERFLOW);
-        if (base >= os_sinit->vtd_pmr_hi_base &&
-            base + size <= os_sinit->vtd_pmr_hi_base + os_sinit->vtd_pmr_hi_size)
+        if (base >= hi_base && base + size <= hi_base + hi_size)
             return 1;
     }
 
@@ -346,36 +411,68 @@ static inline void *txt_init(void)
     return txt_heap;
 }
 
-static inline void txt_verify_pmr_ranges(struct txt_os_mle_data *os_mle,
-                                         struct txt_os_sinit_data *os_sinit,
-                                         struct slr_entry_intel_info *info,
-                                         uint32_t load_base_addr,
-                                         uint64_t tgt_base_addr,
-                                         uint32_t xen_size)
+static inline void txt_verify_dma_protection(struct txt_os_mle_data *os_mle,
+                                              struct txt_os_sinit_data *os_sinit,
+                                              struct slr_entry_intel_info *info,
+                                              uint32_t load_base_addr,
+                                              uint64_t tgt_base_addr,
+                                              uint32_t xen_size)
 {
-    int check_high_pmr = 0;
+    int check_high = 0;
 
-    /* Verify the value of the low PMR base. It should always be 0. */
-    if ( os_sinit->vtd_pmr_lo_base != 0 )
-        txt_reset(SLAUNCH_ERROR_LO_PMR_BASE);
+    if ( os_sinit->capabilities & (1u << TXT_SINIT_MLE_CAP_TPR_SUPPORT) )
+    {
+        struct txt_heap_tpr_req_element *tpr_req;
 
-    /*
-     * Low PMR size should not be 0 on current platforms. There is an ongoing
-     * transition to TPR-based DMA protection instead of PMR-based; this is not
-     * yet supported by the code.
-     */
-    if ( os_sinit->vtd_pmr_lo_size == 0 )
-        txt_reset(SLAUNCH_ERROR_LO_PMR_SIZE);
+        tpr_req = txt_find_tpr_req_element(os_sinit);
+        if ( tpr_req == NULL )
+            txt_reset(SLAUNCH_ERROR_TPR_NOT_FOUND);
+        if ( tpr_req->count < 1 )
+            txt_reset(SLAUNCH_ERROR_TPR_INVALID);
+        if ( tpr_req->count > 2 )
+            txt_reset(SLAUNCH_ERROR_TPR_UNSUPPORTED);
 
-    /* Check if regions overlap. Treat regions with no hole between as error. */
-    if ( os_sinit->vtd_pmr_hi_size != 0 &&
-         os_sinit->vtd_pmr_hi_base <= os_sinit->vtd_pmr_lo_size )
-        txt_reset(SLAUNCH_ERROR_HI_PMR_BASE);
+        /* Lo range must not exceed 4G. */
+        if ( tpr_req->ranges[0].base + tpr_req->ranges[0].size >
+             0x100000000ull )
+            txt_reset(SLAUNCH_ERROR_TPR_INVALID);
 
-    /* All regions accessed by 32b code must be below 4G. */
-    if ( os_sinit->vtd_pmr_hi_base + os_sinit->vtd_pmr_hi_size <=
-         0x100000000ull )
-        check_high_pmr = 1;
+        if ( tpr_req->count >= 2 )
+        {
+            /* Hi range must start at or above 4G. */
+            if ( tpr_req->ranges[1].base < 0x100000000ull )
+                txt_reset(SLAUNCH_ERROR_TPR_INVALID);
+
+            /* Ranges must not overlap. */
+            if ( tpr_req->ranges[0].base + tpr_req->ranges[0].size >
+                 tpr_req->ranges[1].base )
+                txt_reset(SLAUNCH_ERROR_TPR_INVALID);
+
+            /* All regions accessed by 32b code must be below 4G. */
+            if ( tpr_req->ranges[1].base + tpr_req->ranges[1].size <=
+                 0x100000000ull )
+                check_high = 1;
+        }
+    }
+    else
+    {
+        /* Verify the value of the low PMR base. It should always be 0. */
+        if ( os_sinit->vtd_pmr_lo_base != 0 )
+            txt_reset(SLAUNCH_ERROR_LO_PMR_BASE);
+
+        if ( os_sinit->vtd_pmr_lo_size == 0 )
+            txt_reset(SLAUNCH_ERROR_LO_PMR_SIZE);
+
+        /* Check if regions overlap. Treat regions with no hole between. */
+        if ( os_sinit->vtd_pmr_hi_size != 0 &&
+             os_sinit->vtd_pmr_hi_base <= os_sinit->vtd_pmr_lo_size )
+            txt_reset(SLAUNCH_ERROR_HI_PMR_BASE);
+
+        /* All regions accessed by 32b code must be below 4G. */
+        if ( os_sinit->vtd_pmr_hi_base + os_sinit->vtd_pmr_hi_size <=
+             0x100000000ull )
+            check_high = 1;
+    }
 
     /*
      * ACM checks that TXT heap and MLE memory is protected against DMA. We have
@@ -384,21 +481,21 @@ static inline void txt_verify_pmr_ranges(struct txt_os_mle_data *os_mle,
      * both pre- and post-relocation code is protected.
      */
 
-    /* Check if all of Xen before relocation is covered by PMR. */
-    if ( !is_in_pmr(os_sinit, load_base_addr, xen_size, check_high_pmr) )
+    /* Check if all of Xen before relocation is covered. */
+    if ( !is_in_dma_prot(os_sinit, load_base_addr, xen_size, check_high) )
         txt_reset(SLAUNCH_ERROR_LO_PMR_MLE);
 
-    /* Check if all of Xen after relocation is covered by PMR. */
+    /* Check if all of Xen after relocation is covered. */
     if ( load_base_addr != tgt_base_addr &&
-         !is_in_pmr(os_sinit, tgt_base_addr, xen_size, check_high_pmr) )
+         !is_in_dma_prot(os_sinit, tgt_base_addr, xen_size, check_high) )
         txt_reset(SLAUNCH_ERROR_LO_PMR_MLE);
 
-    /* Check if MBI is covered by PMR. MBI starts with 'uint32_t total_size'.
+    /* Check if MBI is covered. MBI starts with 'uint32_t total_size'.
      * There is no MBI on EFI boot. */
     if ( info->boot_params_base != 0 &&
-         !is_in_pmr(os_sinit, info->boot_params_base,
-                    *(uint32_t *)(uintptr_t)info->boot_params_base,
-                    check_high_pmr) )
+         !is_in_dma_prot(os_sinit, info->boot_params_base,
+                         *(uint32_t *)(uintptr_t)info->boot_params_base,
+                         check_high) )
         txt_reset(SLAUNCH_ERROR_BUFFER_BEYOND_PMR);
 
     /* Check if TPM event log (if present) is covered by PMR. */
@@ -421,8 +518,8 @@ static inline void txt_verify_pmr_ranges(struct txt_os_mle_data *os_mle,
      */
     /*
     if ( os_mle->evtlog_addr != 0 && os_mle->evtlog_size != 0 &&
-         !is_in_pmr(os_sinit, os_mle->evtlog_addr, os_mle->evtlog_size,
-                    check_high_pmr) )
+         !is_in_dma_prot(os_sinit, os_mle->evtlog_addr, os_mle->evtlog_size,
+                         check_high) )
         txt_reset(SLAUNCH_ERROR_BUFFER_BEYOND_PMR);
     */
 }
