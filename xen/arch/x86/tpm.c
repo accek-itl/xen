@@ -633,7 +633,6 @@ static void *create_log_event12(struct txt_ev_log_container_12 *evt_log,
 
 #define TPM_HT_PCR   0x00
 
-#define TPM_RH_NULL  0x40000007
 #define TPM_RS_PW    0x40000009
 
 #define HR_SHIFT     24
@@ -1007,57 +1006,30 @@ static uint32_t tpm20_pcr_extend(unsigned loc, uint32_t pcr_handle,
     return swap32(cmd_rsp.r.returnCode);
 }
 
-static bool tpm_supports_hash(unsigned loc, const struct tpm2_log_hash *hash)
-{
-    uint32_t rc;
-    struct tpm2_log_hashes hashes = {
-        .count = 1,
-        .hashes[0] = *hash,
-    };
-
-    /* This is a valid way of checking hash support, using it to not implement
-     * TPM2_GetCapability(). */
-    rc = tpm20_pcr_extend(loc, /*pcr_handle=*/TPM_RH_NULL, &hashes);
-
-    return rc == 0;
-}
-
 static uint32_t tpm2_hash_extend(unsigned loc, const uint8_t *buf,
                                  unsigned size, unsigned pcr,
                                  const struct tpm2_log_hashes *log_hashes)
 {
     uint32_t rc;
     unsigned i;
-    struct tpm2_log_hashes supported_hashes = {0};
 
-    request_locality(loc);
-
+    /*
+     * The event log header lists the allocated PCR banks as set up by the
+     * SINIT ACM.  Compute real digests for algorithms we support; for the
+     * rest, create_log_event20() already initialized the digest to the
+     * "OneDigest" cap value (0x01).
+     */
     for ( i = 0; i < log_hashes->count; ++i ) {
         const struct tpm2_log_hash *hash = &log_hashes->hashes[i];
-        if ( !tpm_supports_hash(loc, hash) ) {
-            printk(XENLOG_WARNING "Skipped hash unsupported by TPM: %d\n",
-                   hash->alg);
-            continue;
-        }
 
         if ( hash->alg == TPM_ALG_SHA1 )
             sha1_hash(buf, size, hash->data);
         else if ( hash->alg == TPM_ALG_SHA256 )
             sha256_hash(buf, size, hash->data);
-        else
-            /* create_log_event20() took care of initializing the digest. */;
-
-        if ( supported_hashes.count == MAX_HASH_COUNT ) {
-            printk(XENLOG_ERR "Hit hash count implementation limit: %d\n",
-                   MAX_HASH_COUNT);
-            return -1;
-        }
-
-        supported_hashes.hashes[supported_hashes.count] = *hash;
-        ++supported_hashes.count;
     }
 
-    rc = tpm20_pcr_extend(loc, HR_PCR + pcr, &supported_hashes);
+    request_locality(loc);
+    rc = tpm20_pcr_extend(loc, HR_PCR + pcr, log_hashes);
     relinquish_locality(loc);
 
     return rc;
@@ -1209,7 +1181,9 @@ void tpm_hash_extend(unsigned loc, unsigned pcr, const uint8_t *buf,
 
         rc = tpm2_hash_extend(loc, buf, size, pcr, &log_hashes);
         if ( rc != 0 ) {
-#ifndef __EARLY_TPM__
+#ifdef __EARLY_TPM__
+            txt_reset(SLAUNCH_ERROR_TPM_FAILED);
+#else
             printk(XENLOG_ERR "Extending PCR%u failed with TPM error: 0x%08x\n",
                    pcr, rc);
 #endif
