@@ -600,6 +600,18 @@ struct tpm2_log_hashes {
 
 #ifdef __EARLY_SLAUNCH__
 
+static unsigned hash_alg_size(uint16_t alg)
+{
+    switch ( alg ) {
+    case TPM_ALG_SHA1:    return SHA1_DIGEST_SIZE;
+    case TPM_ALG_SHA256:  return SHA2_256_DIGEST_SIZE;
+    case TPM_ALG_SHA384:  return 48;
+    case TPM_ALG_SHA512:  return 64;
+    case TPM_ALG_SM3_256: return 32;
+    default:              return 0;
+    }
+}
+
 union tpm2_cmd_rsp {
     uint8_t b[sizeof(struct tpm2_sequence_update_cmd) + MAX_HASH_BLOCK];
     struct tpm_cmd_hdr c;
@@ -744,8 +756,14 @@ static uint32_t tpm2_hash_extend(unsigned loc, const uint8_t *buf,
         }
 
         if ( j == log_hashes->count )
-            /* Can't continue parsing without knowing hash size. */
-            break;
+        {
+            /* Algorithm not in event log — skip its digest data. */
+            unsigned int skip = hash_alg_size(hash_type);
+
+            if ( skip == 0 )
+                break; /* Unknown algorithm, can't continue parsing. */
+            p += skip;
+        }
     }
 
     rc = 0;

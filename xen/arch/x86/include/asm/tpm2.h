@@ -32,7 +32,10 @@
 
 #define TPM_ALG_SHA1        0x0004
 #define TPM_ALG_SHA256      0x000b
+#define TPM_ALG_SHA384      0x000c
+#define TPM_ALG_SHA512      0x000d
 #define TPM_ALG_NULL        0x0010
+#define TPM_ALG_SM3_256     0x0012
 
 #define TPM2_PCR_Extend                 0x00000182
 #define TPM2_PCR_HashSequenceStart      0x00000186
