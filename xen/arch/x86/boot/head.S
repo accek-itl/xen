@@ -144,6 +144,7 @@ mle_header:
 .Lbad_ldr_nih: .asciz "ERR: EFI ImageHandle is not provided by bootloader!"
 .Lbad_efi_msg: .asciz "ERR: EFI IA-32 platforms are not supported!"
 .Lbad_alg_msg: .asciz "ERR: Xen must be loaded at a 2Mb boundary!"
+.Lno_mem_lower_msg: .asciz "ERR: Slaunch requires BASIC_MEMINFO from bootloader!"
 
         .section .init.data, "aw", @progbits
         .align 4
@@ -183,6 +184,12 @@ not_multiboot:
         /* Ditto. */
         mov     $sym_offs(.Lbad_ldr_nih), %ecx
         jmp     .Lget_vtb
+.Lno_mem_lower:
+        /* Slaunch requires BASIC_MEMINFO from the bootloader on EFI. */
+        mov     $sym_offs(.Lno_mem_lower_msg), %ecx
+        xor     %edi,%edi
+        jmp     .Lprint_err
+
 .Lmb2_no_bs:
         /*
          * Ditto. Additionally, here there is a chance that Xen was started
@@ -577,7 +584,9 @@ __start:
         push    %ebx  /* MBI address */
         call    tpm_extend_mbi
 
-        /* Move magic number expected by Multiboot 2 to EAX and fall through. */
+        /* Initialize mem_lower to 0 (may be set by BASIC_MEMINFO tag below)
+         * and move magic number expected by Multiboot 2 to EAX. */
+        xor     %edx,%edx
         movl    $MULTIBOOT2_BOOTLOADER_MAGIC,%eax
 
 .Lmultiboot2_proto:
@@ -597,6 +606,15 @@ __start:
         cmove   MB2_mem_lower(%ecx),%edx
         je      .Lmb2_next_tag
 
+        /*
+         * EFI32/EFI64 tags are fatal in the non-slaunch path: they indicate
+         * the bootloader used the wrong (32-bit) entry point on an EFI
+         * platform.  With slaunch, 32-bit entry is expected regardless of
+         * platform type because SINIT ACM always enters in protected mode.
+         */
+        cmpb    $0, sym_esi(slaunch_active)
+        jnz     .Lmb2_check_end
+
         /* EFI IA-32 platforms are not supported. */
         cmpl    $MULTIBOOT2_TAG_TYPE_EFI32,MB2_tag_type(%ecx)
         je      .Lmb2_efi_ia_32
@@ -605,6 +623,7 @@ __start:
         cmpl    $MULTIBOOT2_TAG_TYPE_EFI64,MB2_tag_type(%ecx)
         je      .Lmb2_no_bs
 
+.Lmb2_check_end:
         /* Is it the end of Multiboot2 information? */
         cmpl    $MULTIBOOT2_TAG_TYPE_END,MB2_tag_type(%ecx)
         je      trampoline_bios_setup
@@ -636,6 +655,16 @@ trampoline_bios_setup:
         mov     %ecx,%fs
         mov     %ecx,%gs
 
+        /*
+         * Compute trampoline address from available memory information.
+         * On BIOS, compare BDA EBDA/base memory with multiboot mem_lower
+         * and use the smallest.  On slaunch, BDA may be invalid (EFI
+         * platform), so use mem_lower directly — the bootloader must
+         * provide BASIC_MEMINFO in this case.
+         */
+        cmpb    $0, sym_esi(slaunch_active)
+        jnz     .Ltramp_from_mem_lower
+
         /* Set up trampoline segment 64k below EBDA */
         movzwl  0x40e,%ecx          /* EBDA segment */
         cmp     $0xa000,%ecx        /* sanity check (high) */
@@ -655,6 +684,17 @@ trampoline_bios_setup:
         shl     $10-4,%edx
         cmp     %ecx,%edx           /* compare with BDA value */
         cmovb   %edx,%ecx           /* and use the smaller */
+        jmp     2f
+
+.Ltramp_from_mem_lower:
+        /*
+         * Use mem_lower (in KB) from multiboot BASIC_MEMINFO directly.
+         * The bootloader must provide this tag; bail out if missing.
+         */
+        test    %edx,%edx
+        jz      .Lno_mem_lower
+        mov     %edx,%ecx
+        shl     $10-4,%ecx
 
 2:
         /* Reserve memory for the trampoline and the low-memory stack. */
@@ -882,6 +922,11 @@ trampoline_setup:
         pushl   MB_cmdline(%ebx)
         call    cmdline_parse_early
 
+1:
+        /* Slaunch always skips real mode — BIOS services are unavailable. */
+        cmpb    $0, sym_esi(slaunch_active)
+        jz      1f
+        movb    $1, sym_esi(skip_realmode)
 1:
         /* Switch to low-memory stack which lives at the end of trampoline region. */
         mov     sym_esi(trampoline_phys), %edi
