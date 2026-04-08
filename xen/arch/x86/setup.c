@@ -57,6 +57,7 @@
 #include <asm/pv/domain.h>
 #include <asm/slaunch.h>
 #include <asm/tpm.h>
+#include <asm/intel_txt.h>
 
 /* opt_nosmp: If true, secondary processors are ignored. */
 static bool __initdata opt_nosmp;
@@ -551,9 +552,12 @@ static void __init parse_video_info(void)
         vga_console_info.u.text_mode_3.rows = bvi->orig_video_lines;
         vga_console_info.u.text_mode_3.columns = bvi->orig_video_cols;
     }
-    else if ( bvi->orig_video_isVGA == 0x23 )
+    else if ( bvi->orig_video_isVGA == 0x23 ||
+              bvi->orig_video_isVGA == 0x70 )
     {
-        vga_console_info.video_type = XEN_VGATYPE_VESA_LFB;
+        vga_console_info.video_type =
+            (bvi->orig_video_isVGA == 0x70) ? XEN_VGATYPE_EFI_LFB
+                                            : XEN_VGATYPE_VESA_LFB;
         vga_console_info.u.vesa_lfb.width = bvi->lfb_width;
         vga_console_info.u.vesa_lfb.height = bvi->lfb_height;
         vga_console_info.u.vesa_lfb.bytes_per_line = bvi->lfb_linelength;
@@ -570,6 +574,7 @@ static void __init parse_video_info(void)
         vga_console_info.u.vesa_lfb.rsvd_size = bvi->rsvd_size;
         vga_console_info.u.vesa_lfb.gbl_caps = bvi->capabilities;
         vga_console_info.u.vesa_lfb.mode_attrs = bvi->vesa_attrib;
+        vga_console_info.u.vesa_lfb.ext_lfb_base = bvi->ext_lfb_base;
     }
 #endif
 }
@@ -851,6 +856,33 @@ static struct domain *__init create_dom0(const module_t *image,
     return d;
 }
 
+/*
+ * Parse the EFI system table and memory map from multiboot2 tags.
+ * Must be called after the boot allocator has pages (for map_pages_to_xen),
+ * and before acpi_boot_table_init() which uses efi.acpi20.
+ */
+static void __init efi_init_from_mb2_tags(const multiboot_info_t *mbi)
+{
+    static bool done;
+    uint64_t systab;
+    unsigned long mmap_addr = 0;
+    unsigned int mmap_size = 0, mdesc_size = 0;
+
+    if ( done || !(mbi->flags & MBI_EFI_SYSTAB) || efi_enabled(EFI_LOADER) )
+        return;
+    done = true;
+
+    systab = (uint64_t)mbi->efi_systab_lo |
+             ((uint64_t)mbi->efi_systab_hi << 32);
+    if ( mbi->flags & MBI_EFI_MMAP )
+    {
+        mmap_addr = mbi->efi_mmap_addr;
+        mmap_size = mbi->efi_mmap_size;
+        mdesc_size = mbi->efi_mmap_descr_size;
+    }
+    efi_init_from_mb2(systab, mmap_addr, mmap_size, mdesc_size);
+}
+
 void __init noreturn __start_xen(unsigned long mbi_p)
 {
     char *memmap_type = NULL;
@@ -1026,6 +1058,14 @@ void __init noreturn __start_xen(unsigned long mbi_p)
     bitmap_fill(module_map, mbi->mods_count);
     __clear_bit(0, module_map); /* Dom0 kernel is always first */
 
+    /*
+     * On the MB2 + EFI path (e.g. slaunch via GRUB on EFI), set EFI_BOOT
+     * early so EFI infrastructure is active.  Full system table parsing
+     * happens later via efi_init_from_mb2() once the directmap is populated.
+     */
+    if ( !efi_enabled(EFI_BOOT) && (mbi->flags & MBI_EFI_SYSTAB) )
+        efi_set_boot();
+
     if ( pvh_boot )
     {
         /* pvh_init() already filled in e820_raw */
@@ -1046,7 +1086,7 @@ void __init noreturn __start_xen(unsigned long mbi_p)
 
         memmap_type = loader;
     }
-    else if ( efi_enabled(EFI_BOOT) )
+    else if ( efi_enabled(EFI_BOOT) && e820_raw.nr_map )
         memmap_type = "EFI";
     else if ( (e820_raw.nr_map = 
                    copy_bios_e820(e820_raw.map,
@@ -1482,6 +1522,10 @@ void __init noreturn __start_xen(unsigned long mbi_p)
     if ( highmem_start )
         xenheap_max_mfn(PFN_DOWN(highmem_start - 1));
 
+    /* Pass RSDP from multiboot2 ACPI tag to ACPI subsystem. */
+    if ( mbi->flags & MBI_RSDP )
+        rsdp_hint = mbi->rsdp_addr;
+
     /*
      * Walk every RAM region and map it in its entirety (on x86/64, at least)
      * and notify it to the boot allocator.
@@ -1502,12 +1546,15 @@ void __init noreturn __start_xen(unsigned long mbi_p)
             continue;
 
         if ( !acpi_boot_table_init_done &&
-             s >= (1ULL << 32) &&
-             !acpi_boot_table_init() )
+             s >= (1ULL << 32) )
         {
-            acpi_boot_table_init_done = true;
-            srat_parse_regions(s);
-            setup_max_pdx(raw_max_page);
+            efi_init_from_mb2_tags(mbi);
+            if ( !acpi_boot_table_init() )
+            {
+                acpi_boot_table_init_done = true;
+                srat_parse_regions(s);
+                setup_max_pdx(raw_max_page);
+            }
         }
 
         if ( pfn_to_pdx((e - 1) >> PAGE_SHIFT) >= max_pdx )
@@ -1685,7 +1732,10 @@ void __init noreturn __start_xen(unsigned long mbi_p)
     init_frametable();
 
     if ( !acpi_boot_table_init_done )
+    {
+        efi_init_from_mb2_tags(mbi);
         acpi_boot_table_init();
+    }
 
     acpi_numa_init();
 
