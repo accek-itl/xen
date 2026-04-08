@@ -644,7 +644,11 @@ static void *create_log_event12(struct txt_ev_log_container_12 *evt_log,
 
 #define TPM_ALG_SHA1        0x0004
 #define TPM_ALG_SHA256      0x000b
+#define TPM_ALG_SHA384      0x000c
+#define TPM_ALG_SHA512      0x000d
+#define TPM_ALG_SM3_256     0x0012
 #define TPM_ALG_NULL        0x0010
+
 
 #define TPM2_PCR_Extend                 0x00000182
 #define TPM2_PCR_HashSequenceStart      0x00000186
@@ -790,6 +794,18 @@ struct tpm2_spec_id_event {
 
 #ifdef __EARLY_TPM__
 
+static unsigned hash_alg_size(uint16_t alg)
+{
+    switch ( alg ) {
+    case TPM_ALG_SHA1:    return SHA1_DIGEST_SIZE;
+    case TPM_ALG_SHA256:  return SHA256_DIGEST_SIZE;
+    case TPM_ALG_SHA384:  return 48;
+    case TPM_ALG_SHA512:  return 64;
+    case TPM_ALG_SM3_256: return 32;
+    default:              return 0;
+    }
+}
+
 union tpm2_cmd_rsp {
     uint8_t b[sizeof(struct tpm2_sequence_update_cmd) + MAX_HASH_BLOCK];
     struct tpm_cmd_hdr c;
@@ -921,8 +937,11 @@ static uint32_t tpm2_hash_extend(unsigned loc, const uint8_t *buf,
         }
 
         if ( j == log_hashes->count ) {
-            /* Can't continue parsing without knowing hash size. */
-            break;
+            /* Algorithm not in event log — skip its digest data. */
+            unsigned skip = hash_alg_size(hash_type);
+            if ( skip == 0 )
+                break; /* Unknown algorithm, can't continue parsing. */
+            p += skip;
         }
     }
 
