@@ -330,6 +330,48 @@ static multiboot_info_t *mbi2_reloc(uint32_t mbi_in, uint32_t video_out)
             break;
 #endif /* CONFIG_VIDEO */
 
+        case MULTIBOOT2_TAG_TYPE_EFI64:
+        {
+            u64 st = get_mb2_data(tag, efi64, pointer);
+
+            mbi_out->flags |= MBI_EFI_SYSTAB;
+            mbi_out->efi_systab_lo = (u32)st;
+            mbi_out->efi_systab_hi = (u32)(st >> 32);
+            break;
+        }
+
+        case MULTIBOOT2_TAG_TYPE_EFI_MMAP:
+        {
+            u32 mmap_len = tag->size - sizeof(multiboot2_tag_efi_mmap_t);
+
+            mbi_out->flags |= MBI_EFI_MMAP;
+            mbi_out->efi_mmap_addr =
+                copy_mem((u32)get_mb2_data(tag, efi_mmap, efi_mmap), mmap_len);
+            mbi_out->efi_mmap_size = mmap_len;
+            mbi_out->efi_mmap_descr_size =
+                get_mb2_data(tag, efi_mmap, descr_size);
+            mbi_out->efi_mmap_descr_vers =
+                get_mb2_data(tag, efi_mmap, descr_vers);
+            break;
+        }
+
+        case MULTIBOOT2_TAG_TYPE_ACPI_NEW:
+            /* Always overrides ACPI_OLD if both are present. */
+            mbi_out->flags |= MBI_RSDP;
+            mbi_out->rsdp_addr =
+                copy_mem((u32)tag + sizeof(*tag), tag->size - sizeof(*tag));
+            break;
+
+        case MULTIBOOT2_TAG_TYPE_ACPI_OLD:
+            if ( !(mbi_out->flags & MBI_RSDP) )
+            {
+                mbi_out->flags |= MBI_RSDP;
+                mbi_out->rsdp_addr =
+                    copy_mem((u32)tag + sizeof(*tag),
+                             tag->size - sizeof(*tag));
+            }
+            break;
+
         case MULTIBOOT2_TAG_TYPE_END:
             goto end; /* Cannot "break;" here. */
 
