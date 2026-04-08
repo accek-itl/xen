@@ -203,6 +203,7 @@ not_multiboot:
 .Lget_vtb:
         mov     sym_esi(vga_text_buffer),%edi
 .Lprint_err:
+        movzbl  sym_esi(slaunch_active), %ebp
         add     %ecx, %esi     # Add string offset to relocation base.
         # NOTE: No further use of sym_esi() till the end of the "function"!
 1:
@@ -223,8 +224,20 @@ not_multiboot:
         mov     $7,%al
         stosb                  # Write an attribute to the VGA text buffer
         jmp     1b
-.Lhalt: hlt
+.Lhalt:
+        test    %ebp,%ebp
+        jnz     .Lslaunch_err_reset
+        hlt
         jmp     .Lhalt
+.Lslaunch_err_reset:
+        movl    $SLAUNCH_ERROR_GENERIC, (TXT_PRIV_CONFIG_REGS_BASE + TXTCR_ERRORCODE)
+        movl    (TXT_PRIV_CONFIG_REGS_BASE + TXTCR_ESTS), %eax
+        movl    $1, (TXT_PRIV_CONFIG_REGS_BASE + TXTCR_CMD_NO_SECRETS)
+        movl    (TXT_PRIV_CONFIG_REGS_BASE + TXTCR_ESTS), %eax
+        movl    $1, (TXT_PRIV_CONFIG_REGS_BASE + TXTCR_CMD_UNLOCK_MEM_CONFIG)
+        movl    (TXT_PRIV_CONFIG_REGS_BASE + TXTCR_ESTS), %eax
+        movl    $1, (TXT_PRIV_CONFIG_REGS_BASE + TXTCR_CMD_RESET)
+0:      jmp     0b
 
         .code64
 
