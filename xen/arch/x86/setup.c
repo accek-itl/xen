@@ -540,7 +540,7 @@ static void __init parse_video_info(void)
     struct boot_video_info *bvi = &bootsym(boot_vid_info);
 
     /* vga_console_info is filled directly on EFI platform. */
-    if ( efi_enabled(EFI_BOOT) )
+    if ( efi_enabled(EFI_LOADER) )
         return;
 
     if ( (bvi->orig_video_isVGA == 1) && (bvi->orig_video_mode == 3) )

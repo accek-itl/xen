@@ -232,12 +232,12 @@ static unsigned int check_drtm_policy(struct slr_table *slrt,
     uint32_t num_mod_entries;
     int min_entries;
 
-    min_entries = efi_enabled(EFI_BOOT) ? 1 : 2;
+    min_entries = efi_enabled(EFI_LOADER) ? 1 : 2;
     if ( policy->nr_entries < min_entries )
         panic("DRTM policy in SLRT contains less than %d entries (%d)!\n",
               min_entries, policy->nr_entries);
 
-    if ( efi_enabled(EFI_BOOT) )
+    if ( efi_enabled(EFI_LOADER) )
     {
         check_slrt_policy_entry(&policy_entry[0], 0, slrt);
         /* SLRT was measured in tpm_measure_slrt(). */
@@ -372,7 +372,7 @@ void tpm_process_drtm_policy(const multiboot_info_t *mbi)
      * will be no corresponding policy entries. Instead, measure command-line
      * and all modules here.
      */
-    if ( efi_enabled(EFI_BOOT) )
+    if ( efi_enabled(EFI_LOADER) )
     {
 #define LOG_DATA(str) (uint8_t *)(str), (sizeof(str) - 1)
         module_t *mods;
