@@ -1202,4 +1202,133 @@ void __stdcall tpm_extend_mbi(uint32_t *mbi, uint32_t slrt_pa)
     tpm_hash_extend(DRTM_LOC, DRTM_DATA_PCR, (uint8_t *)mbi, *mbi,
                     DLE_EVTYPE_SLAUNCH, NULL, 0);
 }
+#else /* !__EARLY_TPM__ */
+static bool is_printable(const uint8_t *data, uint32_t size)
+{
+    uint32_t i;
+
+    for ( i = 0; i < size; i++ )
+    {
+        if ( data[i] == '\0' )
+            return i > 0;
+        if ( data[i] < 0x20 || data[i] > 0x7e )
+            return false;
+    }
+    return size > 0;
+}
+
+static void dump_evt_log_12(struct txt_ev_log_container_12 *evt_log)
+{
+    uint8_t *p = (uint8_t *)evt_log + evt_log->PCREventsOffset;
+    uint8_t *end = (uint8_t *)evt_log + evt_log->NextEventOffset;
+
+    while ( p < end )
+    {
+        struct TPM12_PCREvent *ev = (struct TPM12_PCREvent *)p;
+        unsigned j;
+
+        if ( ev->PCRIndex == DRTM_DATA_PCR || ev->PCRIndex == DRTM_CODE_PCR )
+        {
+            printk("TPM: evt PCR-%u  %u bytes  digest=",
+                   ev->PCRIndex, ev->Size);
+            for ( j = 0; j < SHA1_DIGEST_SIZE; j++ )
+                printk("%02x", ev->Digest[j]);
+            if ( ev->Size && is_printable(ev->Data, ev->Size) )
+                printk("  \"%.*s\"", ev->Size, ev->Data);
+            printk("\n");
+        }
+
+        p += sizeof(*ev) + ev->Size;
+    }
+}
+
+static void dump_evt_log_20(struct tpm2_spec_id_event *evt_log)
+{
+    struct heap_event_log_pointer_element2_1 *log_ext_data;
+    uint8_t *p, *end;
+    unsigned i;
+
+    log_ext_data = find_evt_log_ext_data(evt_log);
+    if ( log_ext_data == NULL )
+        return;
+
+    p = (uint8_t *)evt_log + log_ext_data->first_record_offset;
+    end = (uint8_t *)evt_log + log_ext_data->next_record_offset;
+
+    while ( p < end )
+    {
+        struct tpm2_pcr_event_header *ev = (struct tpm2_pcr_event_header *)p;
+        uint8_t *dp = ev->digests;
+        uint32_t event_size;
+        uint8_t *event_data;
+
+        if ( ev->pcrIndex == DRTM_DATA_PCR || ev->pcrIndex == DRTM_CODE_PCR )
+        {
+            /* Print first digest only. */
+            uint16_t alg = *(uint16_t *)dp;
+            uint16_t dig_size = 0;
+            unsigned j;
+
+            for ( i = 0; i < evt_log->digestCount; i++ )
+            {
+                if ( evt_log->digestSizes[i].algId == alg )
+                {
+                    dig_size = evt_log->digestSizes[i].digestSize;
+                    break;
+                }
+            }
+
+            printk("TPM: evt PCR-%u  ", ev->pcrIndex);
+            printk("alg=%04x  digest=", alg);
+            for ( j = 0; j < dig_size; j++ )
+                printk("%02x", dp[sizeof(uint16_t) + j]);
+        }
+
+        /* Skip all digests to find event data. */
+        dp = ev->digests;
+        for ( i = 0; i < ev->digestCount; i++ )
+        {
+            uint16_t alg = *(uint16_t *)dp;
+            unsigned j;
+
+            dp += sizeof(uint16_t);
+            for ( j = 0; j < evt_log->digestCount; j++ )
+            {
+                if ( evt_log->digestSizes[j].algId == alg )
+                {
+                    dp += evt_log->digestSizes[j].digestSize;
+                    break;
+                }
+            }
+        }
+        event_size = *(uint32_t *)dp;
+        event_data = dp + sizeof(uint32_t);
+
+        if ( ev->pcrIndex == DRTM_DATA_PCR || ev->pcrIndex == DRTM_CODE_PCR )
+        {
+            if ( event_size && is_printable(event_data, event_size) )
+                printk("  \"%.*s\"", event_size, event_data);
+            printk("\n");
+        }
+
+        p = event_data + event_size;
+    }
+}
+
+void tpm_dump_evt_log(void)
+{
+    void *evt_log_addr;
+    uint32_t evt_log_size;
+
+    find_evt_log(__va(slaunch_slrt), &evt_log_addr, &evt_log_size);
+    evt_log_addr = __va(evt_log_addr);
+
+    printk("TPM: event log entries for PCR %d and %d:\n",
+           DRTM_DATA_PCR, DRTM_CODE_PCR);
+
+    if ( is_tpm12() )
+        dump_evt_log_12(evt_log_addr);
+    else
+        dump_evt_log_20(evt_log_addr);
+}
 #endif

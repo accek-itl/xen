@@ -1244,7 +1244,10 @@ void __init noreturn __start_xen(unsigned long mbi_p)
      * do this while memory is uncached (too slow). This must also happen before
      * fields of Multiboot modules change their format below. */
     if ( slaunch_active )
+    {
         tpm_process_drtm_policy(mbi);
+        tpm_dump_evt_log();
+    }
 
     /* Early kexec reservation (explicit static start address). */
     nr_pages = 0;

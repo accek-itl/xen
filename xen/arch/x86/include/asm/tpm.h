@@ -21,4 +21,7 @@ void tpm_measure_slrt(void);
  * is assumed to be virtual). */
 void tpm_process_drtm_policy(const multiboot_info_t *mbi);
 
+/* Dump event log entries for DRTM PCRs (debug helper). */
+void tpm_dump_evt_log(void);
+
 #endif /* _ASM_X86_TPM_H_ */
