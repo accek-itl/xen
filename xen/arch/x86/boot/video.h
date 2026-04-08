@@ -66,6 +66,8 @@ struct boot_video_info {
         uint16_t off;            /* 0x26 */
     } vesapm;
     uint16_t vesa_attrib;        /* 0x28 */
+    /* 2 bytes padding */
+    uint32_t ext_lfb_base;       /* 0x2c */
 };
 #endif /* __ASSEMBLY__ */
 

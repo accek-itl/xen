@@ -321,11 +321,51 @@ static multiboot_info_t *mbi2_reloc(uint32_t mbi_in, uint32_t video_out)
             break;
 
         case MULTIBOOT2_TAG_TYPE_FRAMEBUFFER:
-            if ( (get_mb2_data(tag, framebuffer, framebuffer_type) !=
-                  MULTIBOOT2_FRAMEBUFFER_TYPE_RGB) )
+            if ( get_mb2_data(tag, framebuffer, framebuffer_type) !=
+                 MULTIBOOT2_FRAMEBUFFER_TYPE_RGB )
             {
                 video_out = 0;
                 video = NULL;
+            }
+            else if ( video_out && !video )
+            {
+                /*
+                 * No VBE tag (e.g. EFI platform): fill video info directly
+                 * from the framebuffer tag.  Use EFI LFB type (0x70).
+                 */
+                u64 addr = get_mb2_data(tag, framebuffer, framebuffer_addr);
+
+                video = _p(video_out);
+                video->orig_video_isVGA = 0x70; /* XEN_VGATYPE_EFI_LFB */
+                video->capabilities = 2; /* possibly non-VGA */
+                video->lfb_base = (u32)addr;
+                video->ext_lfb_base = (u32)(addr >> 32);
+                video->lfb_linelength =
+                    get_mb2_data(tag, framebuffer, framebuffer_pitch);
+                video->lfb_width =
+                    get_mb2_data(tag, framebuffer, framebuffer_width);
+                video->lfb_height =
+                    get_mb2_data(tag, framebuffer, framebuffer_height);
+                video->lfb_depth =
+                    get_mb2_data(tag, framebuffer, framebuffer_bpp);
+                video->red_pos =
+                    get_mb2_data(tag, framebuffer, framebuffer_red_field_position);
+                video->red_size =
+                    get_mb2_data(tag, framebuffer, framebuffer_red_mask_size);
+                video->green_pos =
+                    get_mb2_data(tag, framebuffer, framebuffer_green_field_position);
+                video->green_size =
+                    get_mb2_data(tag, framebuffer, framebuffer_green_mask_size);
+                video->blue_pos =
+                    get_mb2_data(tag, framebuffer, framebuffer_blue_field_position);
+                video->blue_size =
+                    get_mb2_data(tag, framebuffer, framebuffer_blue_mask_size);
+                /* lfb_size is in 64KB units. */
+                video->lfb_size =
+                    (get_mb2_data(tag, framebuffer, framebuffer_pitch) *
+                     get_mb2_data(tag, framebuffer, framebuffer_height) +
+                     0xffff) >> 16;
+                video->vesa_attrib = 0x9b;
             }
             break;
 #endif /* CONFIG_VIDEO */
@@ -382,7 +422,7 @@ static multiboot_info_t *mbi2_reloc(uint32_t mbi_in, uint32_t video_out)
  end:
 
 #ifdef CONFIG_VIDEO
-    if ( video )
+    if ( video && video->orig_video_isVGA != 0x70 )
         video->orig_video_isVGA = 0x23;
 #endif
 
