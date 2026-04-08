@@ -28,6 +28,7 @@ asm (
     );
 
 #include "boot/defs.h"
+#include "../../include/xen/multiboot2.h"
 #include "include/asm/intel_txt.h"
 #include "include/asm/slaunch.h"
 #include "include/asm/tpm.h"
@@ -1194,13 +1195,49 @@ void tpm_hash_extend(unsigned loc, unsigned pcr, const uint8_t *buf,
 #ifdef __EARLY_TPM__
 void __stdcall tpm_extend_mbi(uint32_t *mbi, uint32_t slrt_pa)
 {
+    multiboot2_fixed_t *fixed = (multiboot2_fixed_t *)mbi;
+    uint8_t *end = (uint8_t *)mbi + fixed->total_size;
+    uint8_t *p = (uint8_t *)mbi + sizeof(*fixed);
+
     /* Early TPM code isn't linked with the rest but still needs to have this
      * variable with correct value. */
     slaunch_slrt = slrt_pa;
 
-    /* MBI starts with uint32_t total_size. */
-    tpm_hash_extend(DRTM_LOC, DRTM_DATA_PCR, (uint8_t *)mbi, *mbi,
-                    DLE_EVTYPE_SLAUNCH, NULL, 0);
+    /*
+     * Walk MB2 tags and hash only command-line strings (Xen's and modules').
+     * Other tags contain non-deterministic data (load addresses, memory map,
+     * framebuffer info, etc.) that would make PCR18 change boot-to-boot.
+     */
+    while ( p < end )
+    {
+        multiboot2_tag_t *tag = (multiboot2_tag_t *)p;
+
+        if ( tag->type == MULTIBOOT2_TAG_TYPE_END )
+            break;
+
+        if ( tag->type == MULTIBOOT2_TAG_TYPE_CMDLINE )
+        {
+            multiboot2_tag_string_t *cmd = (multiboot2_tag_string_t *)tag;
+            uint32_t str_size = tag->size - sizeof(*cmd);
+
+            tpm_hash_extend(DRTM_LOC, DRTM_DATA_PCR,
+                            (uint8_t *)cmd->string, str_size,
+                            DLE_EVTYPE_SLAUNCH,
+                            (uint8_t *)"MB2: Xen command line", 21);
+        }
+        else if ( tag->type == MULTIBOOT2_TAG_TYPE_MODULE )
+        {
+            multiboot2_tag_module_t *mod = (multiboot2_tag_module_t *)tag;
+            uint32_t str_size = tag->size - sizeof(*mod);
+
+            tpm_hash_extend(DRTM_LOC, DRTM_DATA_PCR,
+                            (uint8_t *)mod->cmdline, str_size,
+                            DLE_EVTYPE_SLAUNCH,
+                            (uint8_t *)"MB2: Module command line", 24);
+        }
+
+        p += ALIGN_UP(tag->size, MULTIBOOT2_TAG_ALIGN);
+    }
 }
 #else /* !__EARLY_TPM__ */
 static bool is_printable(const uint8_t *data, uint32_t size)
