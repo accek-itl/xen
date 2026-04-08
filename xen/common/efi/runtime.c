@@ -4,6 +4,7 @@
 #include <xen/errno.h>
 #include <xen/guest_access.h>
 #include <xen/irq.h>
+#include <xen/slr_table.h>
 #include <xen/time.h>
 
 DEFINE_XEN_GUEST_HANDLE(CHAR16);
@@ -79,7 +80,103 @@ bool efi_enabled(unsigned int feature)
     return test_bit(feature, &efi_flags);
 }
 
+void efi_set_boot(void)
+{
+    __set_bit(EFI_BOOT, &efi_flags);
+}
+
 #ifndef CONFIG_ARM /* TODO - disabled until implemented on ARM */
+
+#define SMBIOS3_TABLE_GUID \
+  { 0xf2fd1544, 0x9794, 0x4a2c, {0x99, 0x2e, 0xe5, 0xbb, 0xcf, 0x20, 0xe3, 0x94} }
+
+static bool __init match_guid(const EFI_GUID *guid1, const EFI_GUID *guid2)
+{
+    return guid1->Data1 == guid2->Data1 &&
+           guid1->Data2 == guid2->Data2 &&
+           guid1->Data3 == guid2->Data3 &&
+           !memcmp(guid1->Data4, guid2->Data4, sizeof(guid1->Data4));
+}
+
+/*
+ * Initialize minimal EFI infrastructure from multiboot2 EFI tags.
+ *
+ * Called after the directmap is populated (boot allocator ready), so we can
+ * map the EFI system table and configuration table pages.  Sets efi_ct,
+ * efi_num_ct, efi.acpi20 etc. for dom0's XENPF_firmware_info hypercall.
+ * Also sets up efi_memmap for efi_init_memory() and dom0 EFI_MEM_INFO queries.
+ *
+ * EFI_BOOT must already be set by the caller before this is invoked (needed
+ * earlier by slaunch).  EFI_LOADER and EFI_RS are intentionally NOT set —
+ * runtime services are unavailable on the MB2 + slaunch path.
+ */
+void __init efi_init_from_mb2(uint64_t systab_phys,
+                               unsigned long mmap_paddr,
+                               unsigned int mmap_size,
+                               unsigned int mdesc_size)
+{
+    const EFI_SYSTEM_TABLE *st;
+    unsigned long ct_phys, ct_size;
+    unsigned int i;
+    static EFI_GUID __initdata acpi2_guid = ACPI_20_TABLE_GUID;
+    static EFI_GUID __initdata acpi_guid = ACPI_TABLE_GUID;
+    static EFI_GUID __initdata mps_guid = MPS_TABLE_GUID;
+    static EFI_GUID __initdata smbios_guid = SMBIOS_TABLE_GUID;
+    static EFI_GUID __initdata smbios3_guid = SMBIOS3_TABLE_GUID;
+    static EFI_GUID __initdata slr_guid = UEFI_SLR_TABLE_GUID;
+
+    /* Set up EFI memory map for efi_init_memory() and dom0 queries. */
+    if ( mmap_size && mdesc_size )
+    {
+        efi_memmap = __va(mmap_paddr);
+        efi_memmap_size = mmap_size;
+        efi_mdesc_size = mdesc_size;
+    }
+
+    /* Map the system table into the directmap. */
+    map_pages_to_xen(
+        (unsigned long)__va(systab_phys) & ~((1UL << L2_PAGETABLE_SHIFT) - 1),
+        maddr_to_mfn(systab_phys & ~((1ULL << L2_PAGETABLE_SHIFT) - 1)),
+        1UL << (L2_PAGETABLE_SHIFT - PAGE_SHIFT),
+        PAGE_HYPERVISOR);
+
+    st = __va(systab_phys);
+
+    efi_version = st->Hdr.Revision;
+    efi_num_ct = st->NumberOfTableEntries;
+    ct_phys = (unsigned long)st->ConfigurationTable;
+
+    /* Map the configuration table array. */
+    ct_size = efi_num_ct * sizeof(EFI_CONFIGURATION_TABLE);
+    if ( ct_size )
+        map_pages_to_xen(
+            (unsigned long)__va(ct_phys) & ~((1UL << L2_PAGETABLE_SHIFT) - 1),
+            maddr_to_mfn(ct_phys & ~((1ULL << L2_PAGETABLE_SHIFT) - 1)),
+            1UL << (L2_PAGETABLE_SHIFT - PAGE_SHIFT),
+            PAGE_HYPERVISOR);
+
+    efi_ct = __va(ct_phys);
+
+    for ( i = 0; i < efi_num_ct; ++i )
+    {
+        if ( match_guid(&acpi2_guid, &efi_ct[i].VendorGuid) )
+            efi.acpi20 = (unsigned long)efi_ct[i].VendorTable;
+        if ( match_guid(&acpi_guid, &efi_ct[i].VendorGuid) )
+            efi.acpi = (unsigned long)efi_ct[i].VendorTable;
+        if ( match_guid(&mps_guid, &efi_ct[i].VendorGuid) )
+            efi.mps = (unsigned long)efi_ct[i].VendorTable;
+        if ( match_guid(&smbios_guid, &efi_ct[i].VendorGuid) )
+            efi.smbios = (unsigned long)efi_ct[i].VendorTable;
+        if ( match_guid(&smbios3_guid, &efi_ct[i].VendorGuid) )
+            efi.smbios3 = (unsigned long)efi_ct[i].VendorTable;
+        if ( match_guid(&slr_guid, &efi_ct[i].VendorGuid) )
+            efi.slr = (unsigned long)efi_ct[i].VendorTable;
+    }
+
+    printk("EFI: System table from multiboot2 at %#"PRIx64
+           ", %u config table entries, %u-byte memory map\n",
+           systab_phys, efi_num_ct, mmap_size);
+}
 
 struct efi_rs_state efi_rs_enter(void)
 {

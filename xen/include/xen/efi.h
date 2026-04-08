@@ -33,6 +33,9 @@ struct xenpf_efi_runtime_call;
 struct compat_pf_efi_runtime_call;
 
 bool efi_enabled(unsigned int feature);
+void efi_set_boot(void);
+void efi_init_from_mb2(uint64_t systab_phys, unsigned long mmap_paddr,
+                       unsigned int mmap_size, unsigned int mdesc_size);
 void efi_init_memory(void);
 bool efi_boot_mem_unused(unsigned long *start, unsigned long *end);
 bool efi_rs_using_pgtables(void);

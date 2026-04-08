@@ -1,10 +1,20 @@
 #include <xen/efi.h>
 #include <xen/errno.h>
 #include <xen/lib.h>
+#include <xen/types.h>
 
 bool efi_enabled(unsigned int feature)
 {
     return false;
+}
+
+void efi_set_boot(void)
+{
+}
+
+void efi_init_from_mb2(uint64_t systab_phys, unsigned long mmap_paddr,
+                       unsigned int mmap_size, unsigned int mdesc_size)
+{
 }
 
 bool efi_rs_using_pgtables(void)
