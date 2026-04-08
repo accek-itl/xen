@@ -30,4 +30,7 @@ void tpm_hash_extend(unsigned loc, unsigned pcr, const uint8_t *buf,
                      unsigned size, uint32_t type, const uint8_t *log_data,
                      unsigned log_data_size);
 
+/* Dump event log entries for DRTM PCRs (debug helper). */
+void tpm_dump_evt_log(void);
+
 #endif /* X86_TPM_H */

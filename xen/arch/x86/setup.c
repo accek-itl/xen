@@ -55,6 +55,7 @@
 #include <asm/spec_ctrl.h>
 #include <asm/stubs.h>
 #include <asm/tboot.h>
+#include <asm/tpm.h>
 #include <asm/trampoline.h>
 #include <asm/traps.h>
 
@@ -1498,7 +1499,10 @@ void asmlinkage __init noreturn __start_xen(void)
      * modules are relocated or used.
      */
     if ( slaunch_active )
+    {
         slaunch_process_drtm_policy(bi);
+        tpm_dump_evt_log();
+    }
 
     /* Early kexec reservation (explicit static start address). */
     nr_pages = 0;
