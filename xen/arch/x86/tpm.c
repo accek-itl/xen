@@ -827,12 +827,13 @@ static uint32_t tpm2_hash_extend(unsigned loc, const uint8_t *buf,
     o_size = sizeof(cmd_rsp);
     send_cmd(loc, cmd_rsp.b, swap32(cmd_rsp.c.paramSize), &o_size);
 
-    if ( cmd_rsp.r.tag == swap16(TPM_ST_NO_SESSIONS) &&
-         cmd_rsp.r.paramSize == swap32(10) ) {
-        rc = swap32(cmd_rsp.r.returnCode);
-        if ( rc != 0 )
-            goto error;
+    if ( o_size < sizeof(struct tpm_rsp_hdr) ) {
+        rc = 1;
+        goto error;
     }
+    rc = swap32(cmd_rsp.r.returnCode);
+    if ( rc != 0 )
+        goto error;
 
     seq_handle = swap32(cmd_rsp.start_r.sequenceHandle);
 
@@ -855,12 +856,13 @@ static uint32_t tpm2_hash_extend(unsigned loc, const uint8_t *buf,
         o_size = sizeof(cmd_rsp);
         send_cmd(loc, cmd_rsp.b, swap32(cmd_rsp.c.paramSize), &o_size);
 
-        if ( cmd_rsp.r.tag == swap16(TPM_ST_NO_SESSIONS) &&
-             cmd_rsp.r.paramSize == swap32(10) ) {
-            rc = swap32(cmd_rsp.r.returnCode);
-            if ( rc != 0 )
-                goto error;
+        if ( o_size < sizeof(struct tpm_rsp_hdr) ) {
+            rc = 1;
+            goto error;
         }
+        rc = swap32(cmd_rsp.r.returnCode);
+        if ( rc != 0 )
+            goto error;
 
         size -= max_bytes;
         buf += max_bytes;
@@ -883,11 +885,22 @@ static uint32_t tpm2_hash_extend(unsigned loc, const uint8_t *buf,
     o_size = sizeof(cmd_rsp);
     send_cmd(loc, cmd_rsp.b, swap32(cmd_rsp.c.paramSize), &o_size);
 
-    if ( cmd_rsp.r.tag == swap16(TPM_ST_NO_SESSIONS) &&
-         cmd_rsp.r.paramSize == swap32(10) ) {
-        rc = swap32(cmd_rsp.r.returnCode);
-        if ( rc != 0 )
-            goto error;
+    if ( o_size < sizeof(struct tpm_rsp_hdr) ) {
+        rc = 1;
+        goto error;
+    }
+    rc = swap32(cmd_rsp.r.returnCode);
+    if ( rc != 0 )
+        goto error;
+
+    /*
+     * EventSequenceComplete response (with sessions):
+     *   header (10) | parameterSize (4) | TPML_DIGEST_VALUES | authArea
+     * finish_r overlays: h (10) | paramSize (4) | hashCount (4) | hashes[]
+     */
+    if ( o_size < sizeof(cmd_rsp.finish_r) + sizeof(uint32_t) ) {
+        rc = 1;
+        goto error;
     }
 
     p = cmd_rsp.finish_r.hashes;
