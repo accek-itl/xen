@@ -43,6 +43,11 @@
 #define MBI_LOADERNAME (_AC(1,u) << 9)
 #define MBI_APM        (_AC(1,u) << 10)
 
+/* Xen-internal extensions. */
+#define MBI_RSDP       (_AC(1,u) << 11) /* RSDP from multiboot2 ACPI tag */
+#define MBI_EFI_SYSTAB (_AC(1,u) << 12) /* EFI system table from MB2 EFI64 tag */
+#define MBI_EFI_MMAP   (_AC(1,u) << 13) /* EFI memory map from MB2 EFI_MMAP tag */
+
 #ifndef __ASSEMBLY__
 
 /* The symbol table for a.out.  */
@@ -101,6 +106,19 @@ typedef struct {
 
     /* Valid if flags sets MBI_APM */
     u32 apm_table;
+
+    /* Valid if flags sets MBI_RSDP (Xen-internal extension) */
+    u32 rsdp_addr;
+
+    /* Valid if flags sets MBI_EFI_SYSTAB (Xen-internal extension) */
+    u32 efi_systab_lo;
+    u32 efi_systab_hi;
+
+    /* Valid if flags sets MBI_EFI_MMAP (Xen-internal extension) */
+    u32 efi_mmap_addr;
+    u32 efi_mmap_size;
+    u32 efi_mmap_descr_size;
+    u32 efi_mmap_descr_vers;
 } multiboot_info_t;
 
 /* The module structure.  */

@@ -230,6 +230,14 @@ typedef struct {
     u32 mod_end;
     char cmdline[];
 } multiboot2_tag_module_t;
+
+typedef struct {
+    u32 type;
+    u32 size;
+    u32 descr_size;
+    u32 descr_vers;
+    u8 efi_mmap[];
+} multiboot2_tag_efi_mmap_t;
 #endif /* __ASSEMBLY__ */
 
 #endif /* __MULTIBOOT2_H__ */
