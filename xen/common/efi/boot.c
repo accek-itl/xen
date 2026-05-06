@@ -474,6 +474,15 @@ static EFI_FILE_HANDLE __init get_parent_handle(const EFI_LOADED_IMAGE *loaded_i
         /* Get the file system interface. */
         ret = efi_bs->HandleProtocol(loaded_image->DeviceHandle,
                                      &fs_protocol, (void **)&fio);
+        if ( ret == EFI_UNSUPPORTED )
+        {
+            /*
+             * The image could come from a device without a file system,
+             * for example it could be a netbooted unified Xen kernel image.
+             */
+            PrintStr(L"File System Protocol not supported on boot device\r\n");
+            return NULL;
+        }
         if ( EFI_ERROR(ret) )
             PrintErrMesg(L"Couldn't obtain the File System Protocol Interface",
                          ret);
