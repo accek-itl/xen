@@ -988,8 +988,9 @@ slaunch_efi_jumpback:
 
 #endif /* XEN_BUILD_EFI && CONFIG_SLAUNCH */
 
+#include "x86_64.S"
+
+        .section .init.data, "aw", @progbits
 ENTRY(trampoline_start)
 #include "trampoline.S"
 ENTRY(trampoline_end)
-
-#include "x86_64.S"
