@@ -315,6 +315,43 @@ void __init asmlinkage noreturn start_xen_from_efi(void)
     unreachable();
 }
 
+/* Return a pointer to the character after the first occurrence of opt in cmd */
+static const char *__init get_option(const char *cmd, const char *opt)
+{
+    const char *s = cmd, *o = NULL;
+
+    if ( !cmd || !opt )
+        return NULL;
+
+    while ( (s = strstr(s, opt)) != NULL )
+    {
+        if ( s == cmd || *(s - 1) == ' ' || *(s - 1) == '\t' )
+        {
+            o = s + strlen(opt);
+            break;
+        }
+
+        s += strlen(opt);
+    }
+
+    return o;
+}
+
+/*
+ * Whether to keep EFI Runtime Services across a Secure Launch.  Xen's normal
+ * option parser isn't available this early (it runs from __start_xen(), after
+ * DRTM), so the assembled command line in mbi.cmdline is scanned directly.
+ * Absent or unrecognised values select the default, "drop".
+ */
+static bool __init slaunch_keep_efi_rs(void)
+{
+    const char *val = get_option((const char *)(unsigned long)mbi.cmdline,
+                                 "slaunch_efi_rs=");
+
+    return val && !strncmp(val, "keep", 4) &&
+           (val[4] == '\0' || val[4] == ' ' || val[4] == '\t');
+}
+
 static void __init attempt_secure_launch(void)
 {
 #ifdef CONFIG_SLAUNCH
@@ -329,21 +366,34 @@ static void __init attempt_secure_launch(void)
          slrt->revision != SLR_TABLE_REVISION )
         return;
 
-    /* Avoid calls into firmware after DRTM. */
-    __clear_bit(EFI_RS, &efi_flags);
-
     /*
-     * Make measurements less sensitive to hardware-specific details.
+     * By default ("slaunch_efi_rs=drop") avoid calls into firmware after DRTM:
+     * UEFI Runtime Services are unmeasured firmware code and re-entering them
+     * undermines the dynamic root of trust.  This also clears EFI fields that
+     * would otherwise make the measured state sensitive to hardware-specific
+     * details.
      *
-     * Intentionally leaving efi_ct and efi_num_ct intact.
+     * "slaunch_efi_rs=keep" leaves Runtime Services (and the fields a dom0
+     * needs to use them, e.g. to read the Secure Boot state) intact.  This is
+     * only sensible together with UEFI Secure Boot, which makes the firmware
+     * part of the static root of trust.
+     *
+     * Intentionally leaving efi_ct and efi_num_ct intact in either case.
      */
-    efi_ih = NULL;
-    efi_bs = NULL;
-    efi_bs_revision = 0;
-    efi_rs = NULL;
-    efi_version = 0;
-    efi_fw_vendor = NULL;
-    efi_fw_revision = 0;
+    if ( !slaunch_keep_efi_rs() )
+    {
+        __clear_bit(EFI_RS, &efi_flags);
+
+        efi_ih = NULL;
+        efi_bs = NULL;
+        efi_bs_revision = 0;
+        efi_rs = NULL;
+        efi_version = 0;
+        efi_fw_vendor = NULL;
+        efi_fw_revision = 0;
+    }
+
+    /* Boot-services consoles are gone post-ExitBootServices regardless. */
     StdOut = NULL;
     StdErr = NULL;
     boot_tsc_stamp = 0;
@@ -886,28 +936,6 @@ static bool __init efi_arch_use_config_file(EFI_SYSTEM_TABLE *SystemTable)
 }
 
 static void __init efi_arch_flush_dcache_area(const void *vaddr, UINTN size) { }
-
-/* Return a pointer to the character after the first occurrence of opt in cmd */
-static const char *__init get_option(const char *cmd, const char *opt)
-{
-    const char *s = cmd, *o = NULL;
-
-    if ( !cmd || !opt )
-        return NULL;
-
-    while ( (s = strstr(s, opt)) != NULL )
-    {
-        if ( s == cmd || *(s - 1) == ' ' || *(s - 1) == '\t' )
-        {
-            o = s + strlen(opt);
-            break;
-        }
-
-        s += strlen(opt);
-    }
-
-    return o;
-}
 
 void __init efi_multiboot2(EFI_HANDLE ImageHandle,
                            EFI_SYSTEM_TABLE *SystemTable,

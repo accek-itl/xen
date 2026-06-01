@@ -2421,6 +2421,25 @@ Use `smap=hvm` to allow SMAP use by HVM guests only.
 In PV shim mode on AMD or Hygon hardware due to significant performance impact
 in some cases and generally lower security risk the option defaults to false.
 
+### slaunch_efi_rs (x86)
+> `= keep | drop`
+
+> Default: `drop`
+
+Only has an effect on an EFI platform performing a Secure Launch (DRTM); ignored
+otherwise.
+
+After the dynamic launch Xen would re-enter UEFI Runtime Services, which are
+unmeasured firmware and therefore outside the dynamic root of trust.  By default
+(`drop`) Xen disables Runtime Services at this point and clears the EFI fields
+that would otherwise make the measured state sensitive to hardware-specific
+details.  A side effect is that a dom0 can no longer use Runtime Services, e.g.
+to read the UEFI Secure Boot state or access EFI variables.
+
+`keep` leaves Runtime Services (and the fields needed to use them) intact across
+the launch.  This is only sensible in combination with UEFI Secure Boot, which
+makes the platform firmware part of the static root of trust.
+
 ### smep (x86)
 > `= <boolean> | hvm`
 
