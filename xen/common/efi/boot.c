@@ -895,6 +895,32 @@ static bool __init read_section(const EFI_LOADED_IMAGE *image,
     return true;
 }
 
+/*
+ * The embedded .config section is emitted read-only by unified-image tooling
+ * (e.g. objcopy --add-section), and the loader keeps it read-only once UEFI
+ * memory mitigations / W^X are in effect.  pre_parse() and the chained-config
+ * logic rewrite the configuration in place, so relocate a section-backed cfg
+ * into freshly allocated, writable memory.  Mark it need_to_free so the usual
+ * cfg teardown (chained re-read, blexit) releases it.  Only the embedded
+ * config needs this; cfg read from a file is already in writable pages, and
+ * other sections (kernel, ramdisk, ...) are consumed read-only in place.
+ */
+static void __init copy_config_to_writable(struct file *file)
+{
+    const void *src = file->ptr;
+    EFI_PHYSICAL_ADDRESS addr = min(1UL << (32 + PAGE_SHIFT),
+                                    HYPERVISOR_VIRT_END - DIRECTMAP_VIRT_START);
+    EFI_STATUS ret = efi_bs->AllocatePages(AllocateMaxAddress, EfiLoaderData,
+                                           PFN_UP(file->size), &addr);
+
+    if ( EFI_ERROR(ret) )
+        blexit(L"Cannot allocate memory for config");
+
+    memcpy((void *)(unsigned long)addr, src, file->size);
+    file->addr = addr;
+    file->need_to_free = true;
+}
+
 static void __init pre_parse(const struct file *file)
 {
     char *ptr = file->str, *end = ptr + file->size;
@@ -1519,7 +1545,10 @@ void EFIAPI __init noreturn efi_start(EFI_HANDLE ImageHandle,
 
         /* Read and parse the config file. */
         if ( read_section(loaded_image, L"config", &cfg, NULL) )
+        {
+            copy_config_to_writable(&cfg);
             PrintStr(L"Using builtin config file\r\n");
+        }
         else if ( !cfg_file_name && file_name )
         {
             CHAR16 *tail;
