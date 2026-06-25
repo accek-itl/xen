@@ -174,7 +174,14 @@ vga_text_buffer:
 efi_platform:
         .byte   0
 
-        .section .init.text, "ax", @progbits
+        /*
+         * 32-bit .code32 boot/SENTER entry code.  Placed in a dedicated
+         * section so efi_arch_relocate_image() can skip its base relocations:
+         * the code is position-independent at runtime (it derives its load
+         * base into %esi) and must keep its image-relative operands at their
+         * un-relocated RVA values.  See xen.lds.S and efi-boot.h.
+         */
+        .section .init.text32, "ax", @progbits
 
 early_error: /* Here to improve the disassembly. */
 
@@ -255,6 +262,8 @@ early_error: /* Here to improve the disassembly. */
         .size early_error, . - early_error
         .type early_error, @function
 
+        /* 64-bit code is RIP-relative (reloc-free); keep it in .init.text. */
+        .section .init.text, "ax", @progbits
         .code64
 
 __efi64_mb2_start:
@@ -344,6 +353,8 @@ x86_32_switch:
         push    %rdx
         lretq
 
+        /* Back to 32-bit .code32 entry code; skipped by the relocator. */
+        .section .init.text32, "ax", @progbits
         .code32
 
 cs32_switch:

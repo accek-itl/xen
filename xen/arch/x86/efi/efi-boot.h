@@ -64,6 +64,36 @@ extern const struct pe_base_relocs {
     u16 entries[];
 } __base_relocs_start[], __base_relocs_end[];
 
+/* Bounds of the executable sections whose relocations must not be applied. */
+extern char __text_header_end[];
+extern char __init_text32_start[], __init_text32_end[];
+
+/*
+ * Relocations that land in executable sections target the multiboot2 header
+ * (.text.header, between _stext and __text_header_end) and the 32-bit .code32
+ * boot/SENTER entry code (.init.text32).  That code is position-independent at
+ * runtime -- it derives its load base into %esi -- and runs before this
+ * relocation pass in the Secure Launch path (or not at all in a plain EFI
+ * boot), so it needs its image-relative operands left at their un-relocated
+ * RVA values; applying the delta would corrupt them.  It is also the only
+ * relocation target in pages the firmware maps read-only under UEFI image
+ * protection (W^X), so skipping these writes also avoids the resulting #PF.
+ * The 32-bit operands carried by the trampoline live in writable .init.data
+ * and are deliberately *not* covered here, so they are relocated normally.
+ *
+ * The symbol addresses resolve to physical (load) addresses here, matching the
+ * physical reloc target computed below (cf. the l{2,3}_bootmap check), because
+ * this code runs RIP-relative at the physical load address before the CR3
+ * switch to the virtual base.
+ */
+static bool __init reloc_in_skipped_section(unsigned long addr)
+{
+    return (addr >= (unsigned long)_stext &&
+            addr <  (unsigned long)__text_header_end) ||
+           (addr >= (unsigned long)__init_text32_start &&
+            addr <  (unsigned long)__init_text32_end);
+}
+
 static void __init efi_arch_relocate_image(unsigned long delta)
 {
     const struct pe_base_relocs *base_relocs;
@@ -90,6 +120,14 @@ static void __init efi_arch_relocate_image(unsigned long delta)
         {
             unsigned long addr = xen_phys_start + base_relocs->rva +
                                  (base_relocs->entries[i] & 0xfff);
+
+            /*
+             * Do not relocate the multiboot2 header or the 32-bit .code32
+             * entry code; their image-relative operands must stay at their
+             * un-relocated RVA values (see reloc_in_skipped_section()).
+             */
+            if ( reloc_in_skipped_section(addr) )
+                continue;
 
             switch ( base_relocs->entries[i] >> 12 )
             {

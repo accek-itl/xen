@@ -77,6 +77,7 @@ SECTIONS
   DECL_SECTION(.text) {
         _stext = .;            /* Text and read-only data */
        *(.text.header)
+       __text_header_end = .;  /* mb2 header relocs skipped by the relocator */
 
        . = ALIGN(PAGE_SIZE);
        _stextentry = .;
@@ -195,6 +196,15 @@ SECTIONS
   __init_begin = .;
   DECL_SECTION(.init.text) {
        _sinittext = .;
+       /*
+        * 32-bit .code32 boot/SENTER entry code (head.S).  Its base
+        * relocations are deliberately not applied by
+        * efi_arch_relocate_image() -- the code is runtime position-independent
+        * and lives in firmware-read-only (W^X) executable pages.
+        */
+       __init_text32_start = .;
+       *(.init.text32)
+       __init_text32_end = .;
        *(.init.text)
        *(.text.startup)
        _einittext = .;
